@@ -4,7 +4,7 @@ import rocketreach
 import time
 
 # Step 1: Load and prep CSV
-df = pd.read_csv("candidates_with_emails_marketing_analyst.csv")
+df = pd.read_csv("candidates_with_emails.csv")
 df = df.dropna(how="all")
 # df["email_1"] = None
 # df["email_2"] = None
@@ -51,7 +51,7 @@ def title_priority(title_norm: str) -> int:
     return len(PRIORITY)
 
 # Step 3: Looping
-for idx, row in df.iloc[0:10].iterrows():
+for idx, row in df.iloc[110:].iterrows():
     name = row.get("name")
     print(f"\n=== Processing row {idx}: {name!r} ===")
     if not isinstance(name, str) or not name.strip():
@@ -156,5 +156,5 @@ for idx, row in df.iloc[0:10].iterrows():
     time.sleep(1.5)  # throttle
 
 # Step 4: save results
-df.to_csv("candidates_with_emails_marketing_analyst.csv", index=False)
-print("\n✅ Done. Results saved to candidates_with_emails_2.csv")
+df.to_csv("candidates_with_emails.csv", index=False)
+print("\n✅ Done. Results saved to candidates_with_emails.csv")
