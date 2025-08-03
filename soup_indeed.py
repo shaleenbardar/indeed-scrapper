@@ -478,6 +478,30 @@ def extract_certifications_text(lines: List[str]) -> str:
         certs.append(ln)
     return " | ".join(certs).strip()
 
+def extract_div_section(soup: BeautifulSoup, *hdrs: str) -> str:
+    """
+    Given header labels (e.g. "Skills" or "Technical Skills"), finds the first
+    <h2> matching one of them, then returns all text in siblings until the next <h2>.
+    """
+    rx = re.compile(r'^(?:' + r'|'.join(map(re.escape, hdrs)) + r')\s*$', re.I)
+    h2 = soup.find("h2", string=rx)
+    if not h2:
+        return ""
+    # header sits inside <div class="section_title">…</div>
+    title_div = h2.find_parent("div", class_="section_title")
+    if not title_div or not title_div.parent:
+        return ""
+    out = []
+    for sib in title_div.parent.find_next_siblings():
+        if sib.find("h2", class_="section_header_title"):
+            break
+        txt = sib.get_text(" ", strip=True)
+        if txt:
+            out.append(txt)
+    return "\n".join(out).strip()
+
+# ─── Main extractor ───
+
 def extract_resume_data(url: str, driver) -> Dict[str, str]:
     snapshot_file = get_snapshot_filename(url)
 
@@ -499,30 +523,106 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
     # ─── Try HTML iframe path ───
     iframe = soup.select_one("iframe[name='resume_frame']")
     if iframe and iframe.has_attr("srcdoc"):
+        # re‐parse the embedded HTML
         html = iframe["srcdoc"]
         soup = BeautifulSoup(html, "html.parser")
+        data: Dict[str,str] = {}
+
+        # small helper to grab a single selector’s text
+        def safe_text(sel: str) -> str:
+            el = soup.select_one(sel)
+            return el.get_text(" ", strip=True) if el else ""
 
         # Name
         name_el = soup.select_one("#basic_info_cell h1.fn")
         data["Name"] = name_el.get_text(strip=True) if name_el else ""
 
-        # Experience
+        # Headline & Location (if you want them)
+        data["Headline"] = safe_text("h2#headline")
+        data["Location"] = safe_text("div.locality")
+
+        # Professional Summary
+        data["Professional Summary"] = safe_text("p#res_summary")
+
+        # Experience (as you already had)
         cont = soup.select_one("#work-experience-items")
+        parts = []
         if cont:
-            parts = []
             for item in cont.select("div.work-experience-section"):
                 title = item.select_one("h3[data-shield-id='workExperience_work_title']")
                 dates = item.select_one("div[data-shield-id='workExperience_work_dates']")
-                desc = item.select_one("p[data-shield-id='workExperience_work_description']")
+                desc  = item.select_one("p[data-shield-id='workExperience_work_description']")
                 if title and dates:
-                    part = f"{title.get_text(strip=True)} ({dates.get_text(strip=True)})"
+                    seg = f"{title.get_text(strip=True)} ({dates.get_text(strip=True)})"
                     if desc:
-                        part += f"\n{desc.get_text(strip=True)}"
-                    parts.append(part)
-            data["Experience"] = "\n\n".join(parts)
-        else:
-            data["Experience"] = ""
+                        seg += "\n" + desc.get_text(" ", strip=True)
+                    parts.append(seg)
+        data["Professional Experience"] = "\n\n".join(parts)
+
+        # Skills (span.skill-text)
+        skills = [s.get_text(strip=True) for s in soup.select("span.skill-text")]
+        data["Skills"] = ", ".join(skills)
+
+        # Certifications
+        certs = []
+        for cert in soup.select("div.certification-section"):
+            t = safe_text("div.certification_title")
+            d = safe_text("div.certification_date")
+            x = safe_text("p.certification_description")
+            line = "; ".join(p for p in (t, d, x) if p)
+            certs.append(line)
+        data["Certifications"] = "\n".join(certs)
+
+        # Education
+        edus = []
+        for ed in soup.select("div.education-section"):
+            t = safe_text("h3.edu_title")
+            s = safe_text("span[data-shield-id='education_edu_school_span']")
+            l = safe_text("span[data-shield-id='education_edu_location_span']")
+            d = safe_text("div[data-shield-id='education_edu_dates']")
+            edus.append("; ".join(p for p in (t, s, l, d) if p))
+        data["Education"] = "\n".join(edus)
+
+        # Links
+        link_el = soup.select_one("div.link_url a[href]")
+        data["Links"] = link_el["href"] if link_el else ""
+
+        # Projects (if your iframe‐HTML ever includes a Projects section)
+        projs = []
+        for pr in soup.select("div.project-section"):
+            projs.append(pr.get_text(" ", strip=True))
+        data["Projects"] = "\n".join(projs)
+
         return data
+
+
+    # # ─── Try HTML iframe path ───
+    # iframe = soup.select_one("iframe[name='resume_frame']")
+    # if iframe and iframe.has_attr("srcdoc"):
+    #     html = iframe["srcdoc"]
+    #     soup = BeautifulSoup(html, "html.parser")
+
+    #     # Name
+    #     name_el = soup.select_one("#basic_info_cell h1.fn")
+    #     data["Name"] = name_el.get_text(strip=True) if name_el else ""
+
+    #     # Experience
+    #     cont = soup.select_one("#work-experience-items")
+    #     if cont:
+    #         parts = []
+    #         for item in cont.select("div.work-experience-section"):
+    #             title = item.select_one("h3[data-shield-id='workExperience_work_title']")
+    #             dates = item.select_one("div[data-shield-id='workExperience_work_dates']")
+    #             desc = item.select_one("p[data-shield-id='workExperience_work_description']")
+    #             if title and dates:
+    #                 part = f"{title.get_text(strip=True)} ({dates.get_text(strip=True)})"
+    #                 if desc:
+    #                     part += f"\n{desc.get_text(strip=True)}"
+    #                 parts.append(part)
+    #         data["Experience"] = "\n\n".join(parts)
+    #     else:
+    #         data["Experience"] = ""
+    #     return data
 
     # # ─── Try PDF spans fallback ───
     # spans = soup.select("div.react-pdf__Page__textContent span[role='presentation']")
@@ -550,79 +650,148 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
         data["CERTIFICATIONS"]        = extract_certifications_text(raw_lines)
         return data
 
-    # ─── Try Div-based layout fallback ───
-    def safe_text(selector: str) -> str:
-        el = soup.select_one(selector)
-        return el.get_text(strip=True) if el else ""
+    # # ─── Try Div-based layout fallback ───  # working for name and experience DIV
+    # def safe_text(selector: str) -> str:
+    #     el = soup.select_one(selector)
+    #     return el.get_text(strip=True) if el else ""
 
-    # Name (first visible part of h1)
-    name_el = soup.select_one("h1#resume-contact")
-    if name_el:
-        data["Name"] = list(name_el.stripped_strings)[0]
-    else:
-        data["Name"] = ""
+    # # Name (first visible part of h1)
+    # name_el = soup.select_one("h1#resume-contact")
+    # if name_el:
+    #     data["Name"] = list(name_el.stripped_strings)[0]
+    # else:
+    #     data["Name"] = ""
 
-    # Headline
-    data["Headline"] = safe_text("h2#headline")
+    # # Headline
+    # data["Headline"] = safe_text("h2#headline")
 
-    # Summary
-    data["Professional Summary"] = safe_text("p#res_summary")
+    # # Summary
+    # data["Professional Summary"] = safe_text("p#res_summary")
 
-    # Experience
-    work_experience = []
-    for item in soup.select("div.work-experience-section"):
-        title = safe_text("h3[data-shield-id='workExperience_work_title']")
-        company = safe_text("span[data-shield-id='workExperience_work_experience_company']")
-        location = safe_text("span[data-shield-id='workExperience_location_span']")
-        dates = safe_text("div[data-shield-id='workExperience_work_dates']")
-        desc = safe_text("p[data-shield-id='workExperience_work_description']")
-        parts = [
-            f"Title: {title}",
-            f"Company: {company}",
-            f"Location: {location}",
-            f"Dates: {dates}",
-            f"Description: {desc}",
-        ]
-        work_experience.append("\n".join(p for p in parts if p.strip()))
-    data["Professional Experience"] = "\n\n".join(work_experience)
+    # # Experience
+    # work_experience = []
+    # for item in soup.select("div.work-experience-section"):
+    #     title = safe_text("h3[data-shield-id='workExperience_work_title']")
+    #     company = safe_text("span[data-shield-id='workExperience_work_experience_company']")
+    #     location = safe_text("span[data-shield-id='workExperience_location_span']")
+    #     dates = safe_text("div[data-shield-id='workExperience_work_dates']")
+    #     desc = safe_text("p[data-shield-id='workExperience_work_description']")
+    #     parts = [
+    #         f"Title: {title}",
+    #         f"Company: {company}",
+    #         f"Location: {location}",
+    #         f"Dates: {dates}",
+    #         f"Description: {desc}",
+    #     ]
+    #     work_experience.append("\n".join(p for p in parts if p.strip()))
+    # data["Professional Experience"] = "\n\n".join(work_experience)
 
-    # Education
-    education = []
-    for item in soup.select("div.education-section"):
-        title = safe_text("h3.edu_title")
-        school = safe_text("span[data-shield-id='education_edu_school_span']")
-        location = safe_text("span[data-shield-id='education_edu_location_span']")
-        dates = safe_text("div[data-shield-id='education_edu_dates']")
-        parts = [
-            f"Title: {title}",
-            f"School: {school}",
-            f"Location: {location}",
-            f"Dates: {dates}",
-        ]
-        education.append("\n".join(p for p in parts if p.strip()))
-    data["Education"] = "\n\n".join(education)
+    # # Education
+    # education = []
+    # for item in soup.select("div.education-section"):
+    #     title = safe_text("h3.edu_title")
+    #     school = safe_text("span[data-shield-id='education_edu_school_span']")
+    #     location = safe_text("span[data-shield-id='education_edu_location_span']")
+    #     dates = safe_text("div[data-shield-id='education_edu_dates']")
+    #     parts = [
+    #         f"Title: {title}",
+    #         f"School: {school}",
+    #         f"Location: {location}",
+    #         f"Dates: {dates}",
+    #     ]
+    #     education.append("\n".join(p for p in parts if p.strip()))
+    # data["Education"] = "\n\n".join(education)
 
-    # Skills
-    skills = [el.get_text(strip=True) for el in soup.select("span.skill-text")]
-    data["Skills"] = ", ".join(skills)
+    # # Skills
+    # skills = [el.get_text(strip=True) for el in soup.select("span.skill-text")]
+    # data["Skills"] = ", ".join(skills)
+
+    # # Certifications
+    # certs = []
+    # for cert in soup.select("div.certification-section"):
+    #     title = safe_text("div.certification_title")
+    #     date = safe_text("div.certification_date")
+    #     desc = safe_text("p.certification_description")
+    #     parts = [
+    #         f"Title: {title}",
+    #         f"Date: {date}",
+    #         f"Description: {desc}",
+    #     ]
+    #     certs.append("\n".join(p for p in parts if p.strip()))
+    # data["Certifications"] = "\n\n".join(certs)
+
+    # # Links
+    # link_el = soup.select_one("div.link_url a[href]")
+    # data["Links"] = link_el["href"] if link_el else ""
+
+    # return data # working for name and experience DIV
+
+    # ── 4) Div‐based layout fallback ──────────────────────────────────────
+
+    # Name + Headline
+    h1 = soup.select_one("h1#resume-contact")
+    data["Name"]     = list(h1.stripped_strings)[0] if h1 else ""
+    hl = soup.select_one("h2#headline")
+    data["Headline"] = hl.get_text(" ", strip=True) if hl else ""
+
+    # Professional Summary
+    data["Professional Summary"] = safe_text = lambda sel: (
+        (soup.select_one(sel).get_text(" ", strip=True)
+         if soup.select_one(sel) else "")
+    )
+    data["Professional Summary"] = (
+        safe_text("p#res_summary")
+        or extract_div_section(soup, "Professional Summary")
+    )
+
+    # Skills / Technical Skills
+    skills = extract_div_section(soup, "Technical Skills")
+    if not skills:
+        skills = extract_div_section(soup, "Skills")
+    # fallback to any <span class="skill-text">
+    if not skills:
+        items = [e.get_text(strip=True) for e in soup.select("span.skill-text")]
+        skills = ", ".join(items)
+    data["Skills"] = skills
 
     # Certifications
-    certs = []
-    for cert in soup.select("div.certification-section"):
-        title = safe_text("div.certification_title")
-        date = safe_text("div.certification_date")
-        desc = safe_text("p.certification_description")
-        parts = [
-            f"Title: {title}",
-            f"Date: {date}",
-            f"Description: {desc}",
-        ]
-        certs.append("\n".join(p for p in parts if p.strip()))
-    data["Certifications"] = "\n\n".join(certs)
+    certs = extract_div_section(soup,
+        "Certifications and Licenses", "Certifications"
+    )
+    data["Certifications"] = certs
 
     # Links
-    link_el = soup.select_one("div.link_url a[href]")
-    data["Links"] = link_el["href"] if link_el else ""
+    link = soup.select_one("div.link_url a[href]")
+    data["Links"] = link["href"] if link else ""
+
+    # Education
+    edu = []
+    for e in (soup.select_one("div.section-item.education-content")
+                   or []).select("div.education-section"):
+        t = e.select_one(".edu_title")
+        s = e.select_one("span[data-shield-id='education_edu_school_span']")
+        l = e.select_one("span[data-shield-id='education_edu_location_span']")
+        d = e.select_one("div[data-shield-id='education_edu_dates']")
+        parts = [x.get_text(strip=True) for x in (t,s,l,d) if x]
+        edu.append(" | ".join(parts))
+    data["Education"] = "\n".join(edu)
+
+    # Work fallback (in case iframe worked but you want div fallback too)
+    work = []
+    for w in soup.select("div.work-experience-section"):
+        t = w.select_one("h3[data-shield-id='workExperience_work_title']")
+        c = w.select_one("span[data-shield-id='workExperience_work_experience_company']")
+        l = w.select_one("span[data-shield-id='workExperience_location_span']")
+        d = w.select_one("div[data-shield-id='workExperience_work_dates']")
+        p = w.select_one("p[data-shield-id='workExperience_work_description']")
+        parts = []
+        if t: parts.append(t.get_text(strip=True))
+        if c: parts.append(c.get_text(strip=True))
+        if l: parts.append(l.get_text(strip=True))
+        if d: parts.append(d.get_text(strip=True))
+        if p: parts.append(p.get_text(" ", strip=True))
+        work.append(" | ".join(parts))
+    data["Professional Experience"] = "\n".join(work)
 
     return data
 
@@ -631,7 +800,7 @@ def main():
 
     urls = [
         "https://resumes.indeed.com/resume/cb459e5ab31ac6de",
-        # "https://resumes.indeed.com/resume/b4e1db87188298c3",
+        "https://resumes.indeed.com/resume/b4e1db87188298c3",
         # "https://resumes.indeed.com/resume/f36ea98f57095137",
         # "https://resumes.indeed.com/resume/7ff20f7be9e91432"
     ]
