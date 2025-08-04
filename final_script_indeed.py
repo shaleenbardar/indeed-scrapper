@@ -91,21 +91,30 @@ def get_snapshot_filename(url: str, directory: str = "snapshots") -> str:
 
 # ─── Helpers for PDF-style spans ───────────────────────────────────────────────
 
+
 _STOP_HEADERS = [
-    "Professional Summary", "Technical Skills",
-    "Professional Experience", "Work Experience", "Experience",
-    "Education", "Skills", "Certifications", "Projects"
+    "Professional Summary",
+    "Professional Experience",
+    "Work Experience",
+    "Experience",
+    "Technical Skills",
+    "Skills",
+    "Certifications",
+    # "Projects"
 ]
+
+# allow optional punctuation/non-word chars before the section name
 _STOP_RX = re.compile(
-    r'^(?:' + r'|'.join(map(re.escape, _STOP_HEADERS)) + r')\:?\s*$',
+    r'^[^\w]*(' + '|'.join(re.escape(h) for h in _STOP_HEADERS) + r')\b',
     re.IGNORECASE
 )
 
 def _merge_fragments(lines: List[str]) -> List[str]:
-    merged, i = [], 0
+    merged = []
+    i = 0
     while i < len(lines):
         ln = lines[i].strip()
-        if len(ln) == 1 and i+1 < len(lines):
+        if len(ln) == 1 and i + 1 < len(lines):
             merged.append(ln + lines[i+1].strip())
             i += 2
         else:
@@ -114,38 +123,103 @@ def _merge_fragments(lines: List[str]) -> List[str]:
     return merged
 
 def _extract_block(lines: List[str], header_rx: re.Pattern) -> str:
-    lines = _merge_fragments([l for l in lines if l.strip()])
-    idx = next((i for i,l in enumerate(lines) if header_rx.match(l)), None)
-    if idx is None:
+    """
+    Find the first line matching header_rx, then collect all subsequent lines
+    until we hit any line that _STOP_RX matches.
+    """
+    # drop truly empty lines, then re-merge hyphens
+    clean = [l for l in lines if l.strip()]
+    clean = _merge_fragments(clean)
+
+    # find where our block starts
+    start = next((i for i, ln in enumerate(clean) if header_rx.match(ln)), None)
+    if start is None:
         return ""
+
     out = []
-    for ln in lines[idx+1:]:
+    for ln in clean[start+1:]:
         if _STOP_RX.match(ln):
             break
         out.append(ln)
     return " ".join(out).strip()
 
-def extract_summary_text(lines: List[str]) -> str:
-    return _extract_block(lines, re.compile(r'^(?:Professional Summary)\:?\s*$', re.I))
+def extract_skills_text(lines: List[str]) -> str:
+    """
+    Extract everything under "Skills" or "Technical Skills", stopping
+    once a new section header appears (even if it's on the same line).
+    """
+    header_rx = re.compile(r'^[^\w]*(?:Skills|Technical Skills)\b', re.IGNORECASE)
+    return _extract_block(lines, header_rx)
 
 def extract_experience_text(lines: List[str]) -> str:
-    return _extract_block(
-        lines,
-        re.compile(r'^(?:Professional Experience|Work Experience|Experience)\:?\s*$', re.I)
+    """
+    Extract everything under Experience / Work Experience / Professional Experience,
+    stopping at the next section header (even if it's punctuated).
+    """
+    header_rx = re.compile(
+        r'^[^\w]*(?:Professional Experience|PROFESSIONAL EXPERIENCE|ROFESSIONAL EXPERIENCE|Work Experience|EXPERIENCE|Experience|PROFESSIONAL EXPERIENCE|WORK EXPERIENCE|Experien)\b',
+        re.IGNORECASE
     )
+    return _extract_block(lines, header_rx)
 
-def extract_skills_text(lines: List[str]) -> str:
-    lines = _merge_fragments([l for l in lines if l.strip()])
-    rx = re.compile(r'^(?:Skills|Technical Skills)\:?\s*$', re.I)
-    idx = next((i for i,l in enumerate(lines) if rx.match(l)), None)
-    if idx is None:
-        return ""
-    out = []
-    for ln in lines[idx+1:]:
-        if _STOP_RX.match(ln) and not rx.match(ln):
-            break
-        out.append(ln)
-    return ", ".join(out).strip()
+# _STOP_HEADERS = [
+#     "Professional Summary", "EXPERIENCE", "PROFESSIONAL EXPERIENCE",
+#     "Professional Experience", "Work Experience", "Experience", "Technical Skills", "Skills", "Certifications"
+# ]
+# _STOP_RX = re.compile(
+#     r'^(?:' + r'|'.join(map(re.escape, _STOP_HEADERS)) + r')\:?\s*$',
+#     re.IGNORECASE
+# )
+
+# def _merge_fragments(lines: List[str]) -> List[str]:
+#     merged, i = [], 0
+#     while i < len(lines):
+#         ln = lines[i].strip()
+#         if len(ln) == 1 and i+1 < len(lines):
+#             merged.append(ln + lines[i+1].strip())
+#             i += 2
+#         else:
+#             merged.append(ln)
+#             i += 1
+#     return merged
+
+# def _extract_block(lines: List[str], header_rx: re.Pattern) -> str:
+#     lines = _merge_fragments([l for l in lines if l.strip()])
+#     idx = next((i for i,l in enumerate(lines) if header_rx.match(l)), None)
+#     if idx is None:
+#         return ""
+#     out = []
+#     for ln in lines[idx+1:]:
+#         if _STOP_RX.match(ln):
+#             break
+#         out.append(ln)
+#     return " ".join(out).strip()
+
+def extract_summary_text(lines: List[str]) -> str:
+    return _extract_block(lines, re.compile(r'^(?:Professional Summary|SUMMARY|Summary|Personal Summary)\:?\s*$', re.I))
+
+# def extract_experience_text(lines: List[str]) -> str:
+#     return _extract_block(
+#         lines,
+#         re.compile(r'^(?:Professional Experience|PROFESSIONAL EXPERIENCE|ROFESSIONAL EXPERIENCE|Work Experience|EXPERIENCE|Experience|PROFESSIONAL EXPERIENCE|WORK EXPERIENCE|Experien)\:?\s*$', re.I)
+#     )
+
+# def extract_skills_text(lines: List[str]) -> str:
+#     return _extract_block(
+#         lines,
+#         re.compile(r'^(?:Skills|Technical Skills)\:?\s*$', re.I)
+#     )
+    # lines = _merge_fragments([l for l in lines if l.strip()])
+    # rx = re.compile(r'^(?:Skills|Technical Skills)\:?\s*$', re.I)
+    # idx = next((i for i,l in enumerate(lines) if rx.match(l)), None)
+    # if idx is None:
+    #     return ""
+    # out = []
+    # for ln in lines[idx+1:]:
+    #     if _STOP_RX.match(ln) and not rx.match(ln):
+    #         break
+    #     out.append(ln)
+    # return ", ".join(out).strip()
 
 def extract_certifications_text(lines: List[str]) -> str:
     return _extract_block(
@@ -213,6 +287,11 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
             f.write(html)
 
     soup = BeautifulSoup(html, "html.parser")
+
+    banner = soup.select_one("span.css-18tk8px.e1wnkr790")
+    if banner and "this resume is unavailable" in banner.get_text(" ", strip=True).lower():
+        print(f"Skipping unavailable resume {url}")
+        return None  # no data for this URL
 
     # tiny helper
     def safe(sel: str) -> str:
@@ -331,36 +410,107 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
     data["Projects"] = extract_div_section(soup, "Projects")
     return data
 
-
 def main():
-    #save_cookies()  # uncomment to generate cookies file first time
+    # uncomment to generate cookies file first time
+    #save_cookies()
+    # urls = [
+    #     "https://resumes.indeed.com/resume/cb459e5ab31ac6de",
+    #     "https://resumes.indeed.com/resume/b4e1db87188298c3",
+    #     "https://resumes.indeed.com/resume/f36ea98f57095137",
+    #     "https://resumes.indeed.com/resume/7ff20f7be9e91432",
+    #     "http://www.indeed.com/r/AISHWARYA+NARAYAN/1e703856a93abfd6",
+    #     "http://www.indeed.com/r/Aishvarya+Konda/e3df3e393d2bae62",
+    #     "http://www.indeed.com/r/Ajay+More/330425801877e902",
+    #     "http://www.indeed.com/r/Adwaith+Thampi/3e582328bb534464",
+    #     "http://www.indeed.com/r/ADITI+GHANATHE/ed2c4473dccbf092",
+    #     "http://www.indeed.com/r/ADITHYA+BURRA/75ba29209b251b3b"
+    # ]
+    # all_rows = []
+    # for url in urls:
+    #     try:
+    #         row = extract_resume_data(url, driver)  # ✅ Pass `driver` here
+    #         row["URL"] = url
+    #         all_rows.append(row)
+    #     except TimeoutException as e:
+    #         print(f"Timeout loading {url}: {e}")
+    #     except Exception as e:
+    #         print(f"Failed to scrape {url}: {e}")
+    # df = pd.DataFrame(all_rows)
+    # df.to_csv("resumes.csv", index=False, encoding="utf-8")
+    # print(f"Written {len(all_rows)} rows to resumes.csv")
+    # driver.quit()
 
-    urls = [
-        "https://resumes.indeed.com/resume/cb459e5ab31ac6de",
-        "https://resumes.indeed.com/resume/b4e1db87188298c3",
-        "https://resumes.indeed.com/resume/f36ea98f57095137",
-        "https://resumes.indeed.com/resume/7ff20f7be9e91432"
-    ]
+    
+    # 1) Read original CSV with the columns we need
+    df_orig = pd.read_csv("resumes_parsed_X.csv", dtype=str)
+    # Strip whitespace & drop rows without a URI
+    df_orig["indeed_uri"] = df_orig["indeed_uri"].str.strip()
+    df_orig = df_orig.dropna(subset=["indeed_uri"])
+
+    # 2) Only process the first 10 URIs
+    df_slice = df_orig.iloc[40:50].copy()
 
     all_rows = []
-    for url in urls:
+    for _, orig in df_slice.iterrows():
+        url = orig["indeed_uri"]
         try:
-            # row = extract_resume_data(url)
-            # all_rows.append(row)
-            row = extract_resume_data(url, driver)  # ✅ Pass `driver` here
-            row["URL"] = url
-            all_rows.append(row)
+            scraped = extract_resume_data(url, driver)
+            time.sleep(5)
         except TimeoutException as e:
             print(f"Timeout loading {url}: {e}")
+            continue
         except Exception as e:
             print(f"Failed to scrape {url}: {e}")
+            continue
 
-    df = pd.DataFrame(all_rows)
-    df.to_csv("resumes.csv", index=False, encoding="utf-8")
-    print(f"Written {len(all_rows)} rows to resumes.csv")
+        # 3) Combine original columns + computed names + scraped fields
+        name = orig.get("name", "").strip()
+        parts = name.split()
+        row = {
+            "resume_pdf_filename": orig.get("resume_pdf_filename", ""),
+            "search_keyword":        orig.get("search_keyword", ""),
+            "indeed_id":             orig.get("indeed_id", ""),
+            "indeed_uri":            url,
+            "name":                  name,
+            "first_name":            parts[0] if parts else "",
+            "last_name":             parts[-1] if parts else "",
+            "resume_name":           name,
+            "city":                  orig.get("city", ""),
+            "state":                 orig.get("state", ""),
+            "professional experience": scraped.get("Professional Experience", ""),
+            "education":               scraped.get("Education", ""),
+            "professional summary":    scraped.get("Professional Summary", ""),
+            "skills":                  scraped.get("Skills", ""),
+            "links":                   scraped.get("Links", ""),
+        }
+
+        all_rows.append(row)
+
+    # 4) Build output DataFrame in the exact column order required
+    out_cols = [
+        "resume_pdf_filename",
+        "search_keyword",
+        "indeed_id",
+        "indeed_uri",
+        "name",
+        "first_name",
+        "last_name",
+        "resume_name",
+        "city",
+        "state",
+        "professional experience",
+        "education",
+        "professional summary",
+        "skills",
+        "links",
+    ]
+    df_out = pd.DataFrame(all_rows, columns=out_cols)
+
+    # 5) Write to new CSV
+    df_out.to_csv("candidates_without_emails.csv", mode='a', header=False, index=False, encoding="utf-8")
+    print(f"Written {len(df_out)} rows to candidates_without_emails.csv")
 
     driver.quit()
-
 
 if __name__ == "__main__":
     main()
