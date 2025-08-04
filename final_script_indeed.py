@@ -214,6 +214,11 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
 
     soup = BeautifulSoup(html, "html.parser")
 
+    banner = soup.select_one("span.css-18tk8px.e1wnkr790")
+    if banner and "this resume is unavailable" in banner.get_text(" ", strip=True).lower():
+        print(f"Skipping unavailable resume {url}")
+        return None  # no data for this URL
+
     # tiny helper
     def safe(sel: str) -> str:
         el = soup.select_one(sel)
@@ -331,36 +336,80 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
     data["Projects"] = extract_div_section(soup, "Projects")
     return data
 
-
 def main():
-    #save_cookies()  # uncomment to generate cookies file first time
+    # uncomment to generate cookies file first time
+    #save_cookies()
 
-    urls = [
-        "https://resumes.indeed.com/resume/cb459e5ab31ac6de",
-        "https://resumes.indeed.com/resume/b4e1db87188298c3",
-        "https://resumes.indeed.com/resume/f36ea98f57095137",
-        "https://resumes.indeed.com/resume/7ff20f7be9e91432"
-    ]
+    # 1) Read original CSV with the columns we need
+    df_orig = pd.read_csv("resumes_parsed_X.csv", dtype=str)
+    # Strip whitespace & drop rows without a URI
+    df_orig["indeed_uri"] = df_orig["indeed_uri"].str.strip()
+    df_orig = df_orig.dropna(subset=["indeed_uri"])
+
+    # 2) Only process the first 10 URIs
+    df_slice = df_orig.iloc[40:50].copy()
 
     all_rows = []
-    for url in urls:
+    for _, orig in df_slice.iterrows():
+        url = orig["indeed_uri"]
         try:
-            # row = extract_resume_data(url)
-            # all_rows.append(row)
-            row = extract_resume_data(url, driver)  # ✅ Pass `driver` here
-            row["URL"] = url
-            all_rows.append(row)
+            scraped = extract_resume_data(url, driver)
+            time.sleep(5)
         except TimeoutException as e:
             print(f"Timeout loading {url}: {e}")
+            continue
         except Exception as e:
             print(f"Failed to scrape {url}: {e}")
+            continue
 
-    df = pd.DataFrame(all_rows)
-    df.to_csv("resumes.csv", index=False, encoding="utf-8")
-    print(f"Written {len(all_rows)} rows to resumes.csv")
+        # 3) Combine original columns + computed names + scraped fields
+        name = orig.get("name", "").strip()
+        parts = name.split()
+        row = {
+            "resume_pdf_filename": orig.get("resume_pdf_filename", ""),
+            "search_keyword":        orig.get("search_keyword", ""),
+            "indeed_id":             orig.get("indeed_id", ""),
+            "indeed_uri":            url,
+            "name":                  name,
+            "first_name":            parts[0] if parts else "",
+            "last_name":             parts[-1] if parts else "",
+            "resume_name":           name,
+            "city":                  orig.get("city", ""),
+            "state":                 orig.get("state", ""),
+            "professional experience": scraped.get("Professional Experience", ""),
+            "education":               scraped.get("Education", ""),
+            "professional summary":    scraped.get("Professional Summary", ""),
+            "skills":                  scraped.get("Skills", ""),
+            "links":                   scraped.get("Links", ""),
+        }
+
+        all_rows.append(row)
+
+    # 4) Build output DataFrame in the exact column order required
+    out_cols = [
+        "resume_pdf_filename",
+        "search_keyword",
+        "indeed_id",
+        "indeed_uri",
+        "name",
+        "first_name",
+        "last_name",
+        "resume_name",
+        "city",
+        "state",
+        "professional experience",
+        "education",
+        "professional summary",
+        "skills",
+        "links",
+    ]
+    df_out = pd.DataFrame(all_rows, columns=out_cols)
+
+    # 5) Write to new CSV
+    df_out.to_csv("candidates_without_emails.csv", mode='a', header=False, index=False, encoding="utf-8")
+    print(f"Written {len(df_out)} rows to candidates_without_emails.csv")
 
     driver.quit()
-
 
 if __name__ == "__main__":
     main()
