@@ -293,6 +293,11 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
         print(f"Skipping unavailable resume {url}")
         return None  # no data for this URL
 
+    banner = soup.select_one("span.css-18tk8px.e1wnkr790")
+    if banner and "this resume is unavailable" in banner.get_text(" ", strip=True).lower():
+        print(f"Skipping unavailable resume {url}")
+        return None  # no data for this URL
+
     # tiny helper
     def safe(sel: str) -> str:
         el = soup.select_one(sel)
