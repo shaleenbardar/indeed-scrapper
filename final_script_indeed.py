@@ -47,7 +47,7 @@ headers = {
     "Referer": "https://resumes.indeed.com/"
 }
 
-driver = uc.Chrome()
+driver = uc.Chrome(version_main=138)
 driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": headers})
 
 cookie_file = "cookies_indeed.pkl"
@@ -453,7 +453,7 @@ def main():
     df_orig = df_orig.dropna(subset=["indeed_uri"])
 
     # 2) Only process the first 10 URIs
-    df_slice = df_orig.iloc[40:50].copy()
+    df_slice = df_orig.iloc[300:400].copy()
 
     all_rows = []
     for _, orig in df_slice.iterrows():

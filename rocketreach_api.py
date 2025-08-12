@@ -4,7 +4,7 @@ import rocketreach
 import time
 
 # Step 1: Load and prep CSV
-df = pd.read_csv("candidates_with_emails.csv")
+df = pd.read_csv("candidates_without_emails.csv")
 df = df.dropna(how="all")
 # df["email_1"] = None
 # df["email_2"] = None
@@ -51,7 +51,7 @@ def title_priority(title_norm: str) -> int:
     return len(PRIORITY)
 
 # Step 3: Looping
-for idx, row in df.iloc[110:].iterrows():
+for idx, row in df.iloc[30:40].iterrows():
     name = row.get("name")
     print(f"\n=== Processing row {idx}: {name!r} ===")
     if not isinstance(name, str) or not name.strip():
@@ -64,8 +64,8 @@ for idx, row in df.iloc[110:].iterrows():
     city_norm = normalize(city) if city else None
     print(f"  City filter: {city_norm!r}")
 
-    # normalize CSV experience_text (for employer & designation matching)
-    exp_norm = normalize(row.get("experience_text", ""))
+    # normalize CSV professional experience (for employer & designation matching)
+    exp_norm = normalize(row.get("professional experience", ""))
 
     # 1) search by name only
     print("  🔍 Searching RocketReach by name...")
@@ -93,14 +93,14 @@ for idx, row in df.iloc[110:].iterrows():
         title_norm = normalize(raw_title)
         print(f"    [{i}] {person.name} ({person.id}) – title: {person.current_title!r}")
 
-        # 1) check if this title is literally in the CSV experience_text
+        # 1) check if this title is literally in the CSV professional experience
         designation_in_exp = bool(title_norm) and (title_norm in exp_norm)
         if designation_in_exp:
-            print("       ★ designation appears in experience_text")
+            print("       ★ designation appears in professional experience")
 
         # 2) if NOT designation_in_exp, then enforce your keyword list
         if not designation_in_exp and not KEYWORDS.search(title_norm):
-            print(f"       ✖ skipped: neither in experience_text nor a target role")
+            print(f"       ✖ skipped: neither in professional experience nor a target role")
             continue
         print("       ✔ passed role check")
 
@@ -156,5 +156,5 @@ for idx, row in df.iloc[110:].iterrows():
     time.sleep(1.5)  # throttle
 
 # Step 4: save results
-df.to_csv("candidates_with_emails.csv", index=False)
-print("\n✅ Done. Results saved to candidates_with_emails.csv")
+df.to_csv("candidates_without_emails.csv", index=False)
+print("\n✅ Done. Results saved to candidates_without_emails.csv")
