@@ -51,7 +51,7 @@ def title_priority(title_norm: str) -> int:
     return len(PRIORITY)
 
 # Step 3: Looping
-for idx, row in df.iloc[30:40].iterrows():
+for idx, row in df.iloc[430:].iterrows():
     name = row.get("name")
     print(f"\n=== Processing row {idx}: {name!r} ===")
     if not isinstance(name, str) or not name.strip():

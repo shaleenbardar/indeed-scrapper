@@ -453,14 +453,14 @@ def main():
     df_orig = df_orig.dropna(subset=["indeed_uri"])
 
     # 2) Only process the first 10 URIs
-    df_slice = df_orig.iloc[300:400].copy()
+    df_slice = df_orig.iloc[487:600].copy()
 
     all_rows = []
     for _, orig in df_slice.iterrows():
         url = orig["indeed_uri"]
         try:
             scraped = extract_resume_data(url, driver)
-            time.sleep(5)
+            time.sleep(3)
         except TimeoutException as e:
             print(f"Timeout loading {url}: {e}")
             continue
