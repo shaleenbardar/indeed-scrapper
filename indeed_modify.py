@@ -15,6 +15,7 @@ from selenium.common.exceptions import TimeoutException
 from collections import defaultdict
 from typing import List, Dict
 from bs4 import Tag
+import csv
 
 # Configure Chrome to download files automatically
 download_dir = os.path.abspath("./downloads")  # Set your download directory
@@ -416,7 +417,7 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
     return data
 
 def main():
-    # save_cookies()
+    save_cookies()
     # 1) Read original CSV with the columns we need
     df_orig = pd.read_csv("resumes_parsed_X.csv", dtype=str)
     # Strip whitespace & drop rows without a URI
@@ -443,7 +444,7 @@ def main():
     ]
 
     batch_size = 10
-    offset = 1564
+    offset = 2818
 
     while True:
         # take next 10
@@ -492,10 +493,25 @@ def main():
         df_out = pd.DataFrame(all_rows, columns=out_cols)
 
         # Append to CSV (unchanged header=False as per your current file)
-        df_out.to_csv("candidates_without_emails.csv",
-                      mode='a', header=False, index=False, encoding="utf-8")
-        print(f"Wrote {len(df_out)} rows to candidates_without_emails.csv")
+        try:
+            df_out.to_csv("candidates_without_emails.csv",
+                        mode='a', header=False, index=False, encoding="utf-8")
+            print(f"Wrote {len(df_out)} rows to candidates_without_emails.csv")
+        except Exception as e:
+            print(f"Error while writing CSV normally: {e}")
+            print("Retrying with quoting and escapechar...")
 
+            # Retry with quoting + escapechar
+            df_out.to_csv(
+                "candidates_without_emails.csv",
+                mode="a",
+                header=False,
+                index=False,
+                encoding="utf-8",
+                quoting=csv.QUOTE_MINIMAL,   # force quotes for safety
+                escapechar="\\"              # escape any bad characters
+            )
+            print(f"Wrote {len(df_out)} rows to candidates_without_emails.csv (with quoting/escapechar)")
         # advance and wait 2 minutes before next batch
         offset += batch_size
         if df_orig.iloc[offset:offset + batch_size].empty:
