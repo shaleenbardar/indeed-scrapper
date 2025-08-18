@@ -416,7 +416,7 @@ def extract_resume_data(url: str, driver) -> Dict[str, str]:
     return data
 
 def main():
-    save_cookies()
+    # save_cookies()
     # 1) Read original CSV with the columns we need
     df_orig = pd.read_csv("resumes_parsed_X.csv", dtype=str)
     # Strip whitespace & drop rows without a URI
@@ -443,7 +443,7 @@ def main():
     ]
 
     batch_size = 10
-    offset = 1184
+    offset = 1564
 
     while True:
         # take next 10
@@ -501,7 +501,7 @@ def main():
         if df_orig.iloc[offset:offset + batch_size].empty:
             break
         print("Waiting 2 minutes before next batch...")
-        time.sleep(120)
+        time.sleep(60)
 
     driver.quit()
 
