@@ -109,451 +109,341 @@ def separate_company_tenure(text):
         # If pattern doesn't match, return original text as company name and None for tenure
         return text, None
 
-def fetch_name(url, search_keyword, target_count=1000):
-    try:
-        global driver
+def fetch_name(url, search_keyword, target_count, seen_ids_csv="indeed_seen_ids.csv"):
+    """
+    Visit an Indeed Resume search URL, extract candidate cards from the grid,
+    and save results to <keyword>_scraped.csv.
+
+    NEW:
+    - Skip any candidate whose cleaned id (without 'MATCH_CARD_BASE-') is in seen_ids_csv.
+    - Append newly scraped ids to seen_ids_csv so they won't be scraped next time.
+
+    DOM (per your sample):
+      - Grid: <ul data-cauto-id="candidate-collection-grid">
+      - Card: <div data-cauto-id="MATCH_CARD_BASE-...">
+      - Name: <span data-cauto-id="candidate-name">
+      - Location: <span class="css-1wagcux ...">
+      - Recent job + company/tenure: first <li> under "Relevant Work Experience"
+      - Education value: sibling span within the "Education" block
+      - Skills: items under ul.css-axcxxt -> div.ecydgvn1
+    """
+    import random
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import pandas as pd
+    import os
+    import time
+
+    global driver
+
+    GRID_XPATH = "//ul[@data-cauto-id='candidate-collection-grid']"
+    ROW_XPATH = "//ul[@data-cauto-id='candidate-collection-grid']//div[starts-with(@data-cauto-id,'MATCH_CARD_BASE-')]"
+
+    def clean_card_id(raw: str) -> str:
+        if not raw:
+            return ""
+        return raw.replace("MATCH_CARD_BASE-", "", 1) if raw.startswith("MATCH_CARD_BASE-") else raw
+
+    def load_seen_ids(path: str) -> set:
+        ids = set()
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path)
+                col = None
+                for c in df.columns:
+                    if c.lower() in ("indeed_id", "id", "candidate_id"):
+                        col = c
+                        break
+                if col is None and df.shape[1] > 0:
+                    col = df.columns[0]
+                if col is not None:
+                    ids = {str(x).strip() for x in df[col].dropna().astype(str).tolist()}
+            except Exception:
+                # Fallback: one id per line text file
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            t = line.strip()
+                            if t:
+                                ids.add(t)
+                except Exception:
+                    pass
+        return ids
+
+    def save_seen_ids(path: str, ids: set):
+        # Write as CSV with header indeed_id
         try:
-            driver.get(url)
+            pd.DataFrame({"indeed_id": sorted(ids)}).to_csv(path, index=False)
         except Exception as e:
-            print(f"Error loading page: {e}")
+            print(f"⚠️ Could not save seen ids CSV: {e}")
+
+    # Navigate
+    try:
+        driver.get(url)
+    except Exception as e:
+        print(f"Error loading page: {e}")
+        try:
             restart_browser()
             driver.get(url)
-            
-        candidate_data = []
-        retry_count = 0
-        max_retries = 20  # Increased retry count
-        candidates_per_page = 0
-        last_save_count = 0
-        page_number = 1
-        browser_restart_count = 0
-        max_browser_restarts = 5
+        except Exception as e2:
+            print(f"Retry failed: {e2}")
+            return []
 
-        # Check if file already exists and load data if it does
-        output_file = search_keyword.replace(" ", "_") + "_scraped.csv"  # Changed filename format
+    # Files
+    output_file = f"{search_keyword.replace(' ', '_')}_scraped.csv"
+
+    # Load previously scraped rows (for continuity of your main CSV)
+    candidate_data = []
+    if os.path.exists(output_file):
         try:
-            if os.path.exists(output_file):
-                existing_df = pd.read_csv(output_file)
-                candidate_data = existing_df.to_dict('records')
-                print(f"📂 Loaded {len(candidate_data)} records from existing file.")
-                last_save_count = len(candidate_data)
+            existing_df = pd.read_csv(output_file)
+            candidate_data = existing_df.to_dict("records")
+            print(f"📂 Loaded {len(candidate_data)} existing rows from {output_file}.")
         except Exception as e:
             print(f"Error loading existing file: {e}")
 
-        while retry_count < max_retries and len(candidate_data) < target_count and browser_restart_count < max_browser_restarts:
-            # hCaptcha detection logic (more accurate)
-            def check_for_hcaptcha():
-                # Check only for clear hCaptcha indicators
-                
-                # Check if URL explicitly contains hcaptcha
-                if "hcaptcha" in driver.current_url.lower():
-                    return True
-                
-                # Check for hCaptcha iframe (most reliable method)
-                try:
-                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    for iframe in iframes:
-                        iframe_src = iframe.get_attribute("src")
-                        if iframe_src and "hcaptcha" in iframe_src:
-                            return True
-                except:
-                    pass
-                
-                # Check for hCaptcha-related elements
-                try:
-                    hcaptcha_elements = driver.find_elements(By.XPATH, "//*[contains(@class, 'h-captcha')]")
-                    if hcaptcha_elements:
-                        return True
-                except:
-                    pass
-                
-                return False
-            
-            # Skip captcha detection at the start of scraping and begin immediately
-            
-            # ✅ [Modified] Wait before collecting data from each page
-            time.sleep(random.uniform(3.0, 5.0))
+    # Load seen ids from the provided file (authoritative skip list)
+    seen_ids = load_seen_ids(seen_ids_csv)
+    print(f"🔎 Loaded {len(seen_ids)} previously seen ids from {seen_ids_csv}.")
 
+    retry_count = 0
+    max_retries = 20
+    last_save_count = len(candidate_data)
+    page_number = 1
+
+    while retry_count < max_retries and len(candidate_data) < target_count:
+        # Wait for the grid
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, GRID_XPATH))
+            )
+        except TimeoutException:
+            retry_count += 1
+            print("❌ Grid not found; retrying...")
             try:
-                # Set longer wait time
-                WebDriverWait(driver, 30).until(
-                    EC.presence_of_all_elements_located((By.XPATH, '//span[contains(@class, "e1wnkr790")]'))
-                )
-            except Exception as e:
-                print(f"❌ Candidate name wait timeout: {e}. Skipping this round.")
-                retry_count += 1
-                time.sleep(3)
-                
-                # Check if we need to save data before retrying
-                if candidate_data and len(candidate_data) > last_save_count:
-                    try:
-                        df = pd.DataFrame(candidate_data)
-                        df['search_keyword'] = search_keyword
-                        df.to_csv(output_file, index=False)
-                        print(f"💾 Timeout recovery save: {len(candidate_data)} candidate records saved to {output_file}.")
-                        last_save_count = len(candidate_data)
-                    except Exception as save_error:
-                        print(f"Error saving data during timeout recovery: {save_error}")
-                
-                # Try refreshing the page
-                try:
-                    driver.refresh()
-                    time.sleep(5)
-                except:
-                    pass
-                
-                # If multiple failures, restart browser
-                if retry_count >= 5:
-                    print("⚠️ Multiple element detection failures. Restarting browser...")
-                    restart_browser()
-                    driver.get(url)
-                    browser_restart_count += 1
-                    retry_count = 0
-                    time.sleep(5)
-                
-                continue
+                driver.save_screenshot("no_grid.png")
+                with open("no_grid.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+            except Exception:
+                pass
+            time.sleep(min(10, 1 + retry_count))
+            continue
 
+        # Find cards
+        try:
+            candidate_rows = WebDriverWait(driver, 20).until(
+                EC.presence_of_all_elements_located((By.XPATH, ROW_XPATH))
+            )
+        except TimeoutException:
+            retry_count += 1
+            print("❌ Candidate cards not found; retrying...")
             try:
-                candidate_rows = WebDriverWait(driver, 20).until(
-                    EC.presence_of_all_elements_located((By.XPATH, '//div[@data-cauto-id="candidate-row"]'))
-                )
-                print(f"Found {len(candidate_rows)} potential candidate rows on the page.")
-            except Exception as e:
-                print(f"❌ Candidate row search timeout: {e}. Skipping this round.")
-                retry_count += 1
-                time.sleep(3)
-                
-                # Check if we need to save data before retrying
-                if candidate_data and len(candidate_data) > last_save_count:
-                    try:
-                        df = pd.DataFrame(candidate_data)
-                        df['search_keyword'] = search_keyword
-                        df.to_csv(output_file, index=False)
-                        print(f"💾 Row search timeout recovery save: {len(candidate_data)} candidate records saved to {output_file}.")
-                        last_save_count = len(candidate_data)
-                    except Exception as save_error:
-                        print(f"Error saving data during row search timeout recovery: {save_error}")
-                
-                # Try refreshing the page
-                try:
-                    driver.refresh()
-                    time.sleep(5)
-                except:
-                    pass
-                
-                # If multiple failures, restart browser
-                if retry_count >= 5:
-                    print("⚠️ Multiple candidate row detection failures. Restarting browser...")
-                    restart_browser()
-                    driver.get(url)
-                    browser_restart_count += 1
-                    retry_count = 0
-                    time.sleep(5)
-                
-                continue
+                driver.save_screenshot("no_candidate_rows.png")
+                with open("no_candidate_rows.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+            except Exception:
+                pass
+            time.sleep(min(10, 1 + retry_count))
+            continue
 
-            new_data = []
+        if not candidate_rows:
+            retry_count += 1
+            print("❌ Candidate cards list empty; retrying...")
+            time.sleep(min(10, 1 + retry_count))
+            continue
 
-            for row in candidate_rows:
-                try:
-                    # Add explicit wait (using lambda function)
-                    WebDriverWait(driver, 10).until(
-                        lambda x: not EC.staleness_of(row)(x)
-                    )
-                    
-                    candidate_id = row.get_attribute("id")
-                    
-                    try:
-                        name_element = WebDriverWait(row, 10).until(
-                            EC.presence_of_element_located((By.XPATH, './/span[contains(@class, "e1wnkr790")]'))
-                        )
-                        name = normalize_text(name_element.text.strip())
-                    except:
-                        print(f"⚠️ Cannot find name for candidate ID {row.get_attribute('id')}. Skipping.")
-                        continue
-                    
-                    # Extract location information (newly added)
-                    location = ""
-                    try:
-                        # Find location element (using class-based selector)
-                        location_elements = row.find_elements(By.CSS_SELECTOR, 'span.css-14usd60.e1wnkr790')
-                        if location_elements and len(location_elements) > 0:
-                            location = normalize_text(location_elements[0].text.strip())
-                        else:
-                            # Try alternative XPath
-                            location_element = row.find_element(By.XPATH, './/div[contains(@class, "css-1t6yw8")]/div[contains(@class, "css-1g97vp8")]/div/div[contains(@class, "css-opjyil")]/span')
-                            if location_element:
-                                location = normalize_text(location_element.text.strip())
-                    except Exception as e:
-                        print(f"⚠️ Cannot find location for candidate {name}: {e}")
-                    
-                    # Extract education information (newly added)
-                    education = ""
-                    try:
-                        # Find education element (using class-based selector)
-                        education_elements = row.find_elements(By.CSS_SELECTOR, 'div[data-cauto-id="qualifications-section-column"] div:nth-child(1) span.css-8vni6v.e1wnkr790')
-                        if education_elements and len(education_elements) > 0:
-                            education = normalize_text(education_elements[0].text.strip())
-                        else:
-                            # Try alternative XPath
-                            education_element = row.find_element(By.XPATH, './/div[@data-cauto-id="qualifications-section-column"]//div[1]/span[2]')
-                            if education_element:
-                                education = normalize_text(education_element.text.strip())
-                    except Exception as e:
-                        print(f"⚠️ Cannot find education for candidate {name}: {e}")
-                    
-                    # Extract skills information (newly added)
-                    skills = []
-                    try:
-                        # Find skill elements (using class-based selector)
-                        skill_elements = row.find_elements(By.CSS_SELECTOR, 'div.css-1f1q1js.ecydgvn1')
-                        for skill_element in skill_elements:
-                            skill = normalize_text(skill_element.text.strip())
-                            if skill:
-                                skills.append(skill)
-                    except Exception as e:
-                        print(f"⚠️ Cannot find skills for candidate {name}: {e}")
-                    
-                    # Extract job title (newly added)
-                    job_title = ""
-                    try:
-                        # Find job title element (using class-based selector)
-                        job_title_elements = row.find_elements(By.CSS_SELECTOR, 'span.css-vc4n5s.e1wnkr790')
-                        if job_title_elements and len(job_title_elements) > 0:
-                            job_title = normalize_text(job_title_elements[0].text.strip())
-                        else:
-                            # Try alternative XPath
-                            job_title_element = row.find_element(By.XPATH, './/div[contains(@class, "css-d641o9")]/div/ul/li[1]/div/span[1]')
-                            if job_title_element:
-                                job_title = normalize_text(job_title_element.text.strip())
-                    except Exception as e:
-                        print(f"⚠️ Cannot find job title for candidate {name}: {e}")
-                    
-                    # Extract company name and tenure (newly added)
-                    company_text = ""
-                    company_name = ""
-                    tenure = ""
-                    try:
-                        # Find company element (using class-based selector)
-                        company_elements = row.find_elements(By.CSS_SELECTOR, 'span.css-8vni6v.e1wnkr790')
-                        if company_elements and len(company_elements) > 0:
-                            company_text = normalize_text(company_elements[0].text.strip())
-                        else:
-                            # Try alternative XPath
-                            company_element = row.find_element(By.XPATH, './/div[contains(@class, "css-d641o9")]/div/ul/li[1]/div/span[2]')
-                            if company_element:
-                                company_text = normalize_text(company_element.text.strip())
-                        
-                        # Separate company name and tenure
-                        if company_text:
-                            company_name, tenure = separate_company_tenure(company_text)
-                    except Exception as e:
-                        print(f"⚠️ Cannot find company name for candidate {name}: {e}")
+        print(f"📄 Page {page_number}: found {len(candidate_rows)} candidate cards.")
+        retry_count = 0
 
-                    if name and name not in [d['name'] for d in candidate_data]:
-                        uri = f"http://www.indeed.com/r/{name.replace(' ', '+')}/{candidate_id}"
-                        # Add job title, company name, tenure, location, education, skills
-                        new_data.append({
-                            'name': name, 
-                            'indeed_id': candidate_id, 
-                            'uri': uri,
-                            'location': location,
-                            'education': education,
-                            'skills': ', '.join(skills) if skills else '',  # Add skills (comma separated)
-                            'job_title': job_title,
-                            'company_name': company_name,
-                            'tenure': tenure
-                        })
-                        candidates_per_page += 1
+        new_data = []
+        new_seen_ids = set()  # collect newly encountered ids this pass (to append to the file)
 
-                        # ✅ [Modified] Wait after collecting each name
-                        time.sleep(random.uniform(0.5, 1.0))
+        for row in candidate_rows:
+            try:
+                WebDriverWait(driver, 10).until(lambda d: row.is_displayed())
 
-                except Exception as e:
-                    print(f"⚠️ Error extracting candidate information: {e}. Skipping.")
+                raw_id = row.get_attribute("data-cauto-id") or ""
+                card_id = clean_card_id(raw_id)
+                if not card_id:
+                    # fallback: try @id (less ideal)
+                    card_id = clean_card_id(row.get_attribute("id") or "")
+
+                # Skip if already seen
+                if card_id and card_id in seen_ids:
+                    # print(f"↩️ Skipping already-seen id: {card_id}")
                     continue
 
-            if not new_data:
-                retry_count += 1
-                time.sleep(2)
-                continue
+                # Name
+                try:
+                    name_el = row.find_element(By.XPATH, ".//span[@data-cauto-id='candidate-name']")
+                    name = normalize_text(name_el.text)
+                except NoSuchElementException:
+                    continue  # no name, skip
 
+                # Location
+                try:
+                    loc_el = row.find_element(By.XPATH, ".//span[contains(@class,'css-1wagcux')]")
+                    location = normalize_text(loc_el.text)
+                except NoSuchElementException:
+                    location = ""
+
+                # Job title (most recent)
+                try:
+                    job_el = row.find_element(
+                        By.XPATH,
+                        ".//div[contains(@class,'css-f5ofyr')]//ul/li[1]//span[contains(@class,'css-mlbsyu')]"
+                    )
+                    job_title = normalize_text(job_el.text)
+                except NoSuchElementException:
+                    job_title = ""
+
+                # Company + tenure
+                try:
+                    comp_ten_el = row.find_element(
+                        By.XPATH,
+                        ".//div[contains(@class,'css-f5ofyr')]//ul/li[1]//span[contains(@class,'css-vnnk8q')]"
+                    )
+                    company_text = normalize_text(comp_ten_el.text)
+                    company_name, tenure = separate_company_tenure(company_text)
+                except NoSuchElementException:
+                    company_name, tenure = "", ""
+
+                # Education
+                try:
+                    edu_el = row.find_element(
+                        By.XPATH,
+                        ".//div[.//span[normalize-space()='Education']]//span[contains(@class,'css-vnnk8q')]"
+                    )
+                    education = normalize_text(edu_el.text)
+                except NoSuchElementException:
+                    education = ""
+
+                # Skills
+                skills = []
+                for s in row.find_elements(By.XPATH, ".//ul[contains(@class,'css-axcxxt')]//div[contains(@class,'ecydgvn1')]"):
+                    t = normalize_text(s.text)
+                    if t:
+                        skills.append(t)
+                skills_csv = ", ".join(skills)
+
+                # Record
+                unique_id = card_id if card_id else f"{name}::{location}"
+                uri = f"http://www.indeed.com/r/{name.replace(' ', '+')}/{unique_id}"
+
+                new_data.append({
+                    "name": name,
+                    "indeed_id": unique_id,
+                    "uri": uri,
+                    "location": location,
+                    "education": education,
+                    "skills": skills_csv,
+                    "job_title": job_title,
+                    "company_name": company_name,
+                    "tenure": tenure,
+                })
+
+                # Track as seen so we never scrape this id again
+                if card_id:
+                    new_seen_ids.add(card_id)
+
+                time.sleep(random.uniform(0.15, 0.4))
+
+            except Exception as e:
+                print(f"⚠️ Error parsing a card: {e}")
+
+        if not new_data:
+            retry_count += 1
+            time.sleep(min(8, 1 + retry_count))
+        else:
             candidate_data.extend(new_data)
-            print(f"✅ Found {len(new_data)} new candidates. Total: {len(candidate_data)}")
+            print(f"✅ Added {len(new_data)} new candidates. Total: {len(candidate_data)}")
             retry_count = 0
 
-            # Periodically save data (every 20 candidates)
-            if len(candidate_data) - last_save_count >= 20:
-                try:
-                    df = pd.DataFrame(candidate_data)
-                    df['search_keyword'] = search_keyword
-                    df.to_csv(output_file, index=False)
-                    print(f"💾 Interim save: {len(candidate_data)} candidate records saved to {output_file}.")
-                    last_save_count = len(candidate_data)
-                except Exception as e:
-                    print(f"Error saving data: {e}")
+            # Update seen ids set in memory
+            if new_seen_ids:
+                seen_ids.update(new_seen_ids)
 
-            # ✅ [Modified] Wait after scrolling
+        # Save every 20 rows — both main CSV and seen-ids CSV
+        if len(candidate_data) - last_save_count >= 20:
             try:
-                # Check if the last element is still valid before scrolling
-                if len(candidate_rows) > 0:
-                    last_element = candidate_rows[-1]
-                    driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", last_element)
-                    time.sleep(random.uniform(2.0, 3.0))
+                pd.DataFrame(candidate_data).assign(search_keyword=search_keyword).to_csv(output_file, index=False)
+                print(f"💾 Saved {len(candidate_data)} rows to {output_file}.")
+                last_save_count = len(candidate_data)
             except Exception as e:
-                print(f"Error during scrolling: {e}")
-                # Try refreshing the page if error occurs
+                print(f"Save error: {e}")
+            # Persist the seen ids too
+            save_seen_ids(seen_ids_csv, seen_ids)
+            print(f"🧾 Seen ids updated: {len(seen_ids)} total.")
+
+        # Trigger lazy-load
+        try:
+            if candidate_rows:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior:'smooth', block:'center'});",
+                    candidate_rows[-1]
+                )
+                time.sleep(random.uniform(0.8, 1.4))
+        except Exception as e:
+            print(f"Scroll error: {e}")
+
+        if len(candidate_data) >= target_count:
+            break
+
+        # Pagination (Next button by text)
+        next_button = None
+        for xp in [
+            "//button[.//span[normalize-space()='Next'] and not(@disabled)]",
+            "//button[normalize-space()='Next' and not(@disabled)]"
+        ]:
+            try:
+                next_button = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, xp))
+                )
+                break
+            except TimeoutException:
+                pass
+
+        if next_button:
+            try:
+                # Save safety before changing page
+                if len(candidate_data) > last_save_count:
+                    pd.DataFrame(candidate_data).assign(search_keyword=search_keyword).to_csv(output_file, index=False)
+                    print(f"💾 Pre-pagination save: {len(candidate_data)} rows.")
+                    last_save_count = len(candidate_data)
+                    save_seen_ids(seen_ids_csv, seen_ids)
+                    print(f"🧾 Seen ids updated: {len(seen_ids)} total.")
+
+                next_button.click()
+                page_number += 1
+                time.sleep(random.uniform(2.5, 4.0))
+            except Exception as e:
+                print(f"Pagination click failed: {e}")
                 try:
                     driver.refresh()
-                    time.sleep(5)
-                    retry_count += 1
-                    continue
-                except:
+                    time.sleep(3)
+                except Exception:
                     pass
-
-            if candidates_per_page >= 45:  # More flexible condition
-                try:
-                    # Add explicit wait with multiple selectors to find the Next button
-                    try:
-                        # Try the exact CSS selector provided by the user
-                        next_button = WebDriverWait(driver, 10).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, "#app-root > div.css-1gorjcl.e37uo190 > div.css-lamjma.e37uo190 > div.css-13jgm14.e37uo190 > div.css-1yai4xz.eu4oa1w0 > div > main > div > div.css-1we8n3j.e37uo190 > div.css-wje6xa.eu4oa1w0 > div.css-1ghiswo.e37uo190 > div.css-wje6xa.eu4oa1w0 > div > div.css-1poky25.e37uo190 > div > div > button.css-1lmld4d.e8ju0x50"))
-                        )
-                        print("Found Next button using CSS selector")
-                    except:
-                        try:
-                            # Try the exact XPath provided by the user
-                            next_button = WebDriverWait(driver, 10).until(
-                                EC.element_to_be_clickable((By.XPATH, "//*[@id='app-root']/div[3]/div[2]/div[2]/div[4]/div/main/div/div[4]/div[1]/div[2]/div[2]/div/div[3]/div/div/button[2]"))
-                            )
-                            print("Found Next button using XPath")
-                        except:
-                            # Try more generic selectors as fallback
-                            try:
-                                # Try to find by button text
-                                next_button = WebDriverWait(driver, 10).until(
-                                    EC.element_to_be_clickable((By.XPATH, "//button[span[text()='Next']]"))
-                                )
-                                print("Found Next button using text content")
-                            except:
-                                # Try to find by class name
-                                next_button = WebDriverWait(driver, 10).until(
-                                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button.css-1lmld4d.e8ju0x50"))
-                                )
-                                print("Found Next button using class name")
-                    
-                    if next_button:
-                        print(f"➡️ Moving from page {page_number} to page {page_number+1}...")
-                        
-                        # Save current data before page transition (safety measure)
-                        if candidate_data:
-                            try:
-                                df = pd.DataFrame(candidate_data)
-                                df['search_keyword'] = search_keyword
-                                df.to_csv(output_file, index=False)
-                                print(f"💾 Pre-transition save: {len(candidate_data)} candidate records saved to {output_file}.")
-                                last_save_count = len(candidate_data)
-                            except Exception as e:
-                                print(f"Error saving data: {e}")
-                        
-                        # Navigate to next page
-                        next_button.click()
-                        candidates_per_page = 0
-                        page_number += 1
-
-                        # ✅ [Modified] Increase wait time after page transition (to allow hCaptcha to appear)
-                        time.sleep(random.uniform(6.0, 8.0))
-                        retry_count = 0
-                        
-                        # Check for hCaptcha after page transition (commonly occurs during transitions)
-                        print("Checking for hCaptcha after page transition...")
-                        if check_for_hcaptcha():
-                            print("\n" + "="*50)
-                            print("🚨 hCaptcha detected after page transition! Please solve it manually in the browser window.")
-                            print("⏰ Take your time. Press Enter when you're done.")
-                            print("="*50 + "\n")
-                            
-                            # Give user time to solve the captcha
-                            input("✅ Press Enter after solving the hCaptcha...")
-                            
-                            # After user presses Enter, assume hCaptcha is solved and continue
-                            print("✅ Continuing after hCaptcha resolution...")
-                            
-                            # Force refresh the page to ensure hCaptcha is cleared
-                            driver.refresh()
-                            time.sleep(5)
-                            
-                            # Additional wait after captcha resolution
-                            time.sleep(5)
-                        else:
-                            print("✅ No hCaptcha detected after page transition.")
-                    else:
-                        break
-                except Exception as e:
-                    print(f"Error clicking next page: {e}")
-                    # Try refreshing the page if error occurs
-                    try:
-                        print("⚠️ Error navigating to next page. Refreshing and trying again...")
-                        driver.refresh()
-                        time.sleep(5)
-                        retry_count += 1
-                        
-                        # Save current data before attempting to continue
-                        if candidate_data:
-                            try:
-                                df = pd.DataFrame(candidate_data)
-                                df['search_keyword'] = search_keyword
-                                df.to_csv(output_file, index=False)
-                                print(f"💾 Error recovery save: {len(candidate_data)} candidate records saved to {output_file}.")
-                                last_save_count = len(candidate_data)
-                            except Exception as save_error:
-                                print(f"Error saving data during recovery: {save_error}")
-                        
-                        # If multiple failures, restart browser
-                        if retry_count >= 3:
-                            print("⚠️ Multiple navigation failures. Restarting browser...")
-                            restart_browser()
-                            driver.get(url)
-                            browser_restart_count += 1
-                            time.sleep(5)
-                        
-                        continue
-                    except Exception as refresh_error:
-                        print(f"Error during page refresh: {refresh_error}")
-                        # Try restarting browser as last resort
-                        restart_browser()
-                        driver.get(url)
-                        browser_restart_count += 1
-                        time.sleep(5)
-                        continue
-
-        # Final data save
-        if candidate_data:
-            df = pd.DataFrame(candidate_data)
-            df['search_keyword'] = search_keyword
-            df.to_csv(output_file, index=False)
-            print(f"✅ Final data saved to {output_file}. Total candidates: {len(candidate_data)}.")
         else:
-            print("❌ No candidate data collected.")
+            print("ℹ️ No Next button detected; ending pagination.")
+            break
 
-        return candidate_data
+    # Final saves
+    if candidate_data:
+        try:
+            pd.DataFrame(candidate_data).assign(search_keyword=search_keyword).to_csv(output_file, index=False)
+            print(f"✅ Final save: {len(candidate_data)} rows to {output_file}.")
+        except Exception as e:
+            print(f"Final save error: {e}")
+    else:
+        print("❌ No candidate data collected.")
 
-    except Exception as e:
-        print(f"Error: {e}")
-        driver.save_screenshot("timeout_error.png")
-        print("Screenshot saved to timeout_error.png.")
-        
-        # Save data collected before error occurred
-        if len(candidate_data) > 0:
-            try:
-                df = pd.DataFrame(candidate_data)
-                df['search_keyword'] = search_keyword
-                output_file = search_keyword.replace(" ", "_") + "_scraped.csv"
-                df.to_csv(output_file, index=False)
-                print(f"⚠️ {len(candidate_data)} candidate records collected before error saved to {output_file}.")
-            except Exception as save_error:
-                print(f"Additional error while saving data after main error: {save_error}")
-        
-        return candidate_data
+    # Persist the seen ids one last time
+    save_seen_ids(seen_ids_csv, seen_ids)
+    print(f"✅ Seen ids saved to {seen_ids_csv} ({len(seen_ids)} total).")
+
+    return candidate_data
 
 
 #####################################################################################
@@ -618,63 +508,10 @@ def extract_candidate_pages(url, search_keyword, target_count=1000):
 
 def main():
 
-    save_cookies()
+    #save_cookies()
     # Provide search keyword selection options to the user
-    print("\n===== Indeed Resume Scraping =====")
-    print("Select a search keyword or enter your own:")
-    print("1. Data Analyst")
-    print("2. Business Analyst")
-    print("3. Marketing Analyst")
-    print("4. Custom Input")
-    
-    # Ask for target count
-    print("\nHow many candidates do you want to scrape?")
-    print("1. 100 candidates")
-    print("2. 200 candidates")
-    print("3. 500 candidates")
-    print("4. 1000 candidates")
-    print("5. Custom number")
-    
-    keyword_choice = input("\nEnter option number (1-4) for keyword: ")
-    
-    if keyword_choice == '1':
-        search_keyword = "data analyst"
-    elif keyword_choice == '2':
-        search_keyword = "business analyst"
-    elif keyword_choice == '3':
-        search_keyword = "marketing analyst"
-    elif keyword_choice == '4':
-        search_keyword = input("Enter search keyword: ")
-    else:
-        print("Invalid selection. Using default 'business analyst'.")
-        search_keyword = "business analyst"
-    
-    # Get target count from user
-    count_choice = input("\nEnter option number (1-5) for number of candidates: ")
-    
-    if count_choice == '1':
-        target_count = 100
-    elif count_choice == '2':
-        target_count = 200
-    elif count_choice == '3':
-        target_count = 500
-    elif count_choice == '4':
-        target_count = 1000
-    elif count_choice == '5':
-        try:
-            target_count = int(input("Enter custom number of candidates to scrape: "))
-            if target_count <= 0:
-                print("Invalid number. Using default 200 candidates.")
-                target_count = 200
-        except ValueError:
-            print("Invalid input. Using default 200 candidates.")
-            target_count = 200
-    else:
-        print("Invalid selection. Using default 200 candidates.")
-        target_count = 200
-    
-    print(f"\nSelected keyword: '{search_keyword}'")
-    print(f"Target number of candidates: {target_count}")
+    search_keyword = "data analyst"
+    target_count = 10
     print(f"Scraping resumes from Indeed with this keyword...\n")
     
     # Add sorting option (date = sort by date)
